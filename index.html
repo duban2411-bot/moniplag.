@@ -521,6 +521,9 @@ details.tec .cuerpo{padding:0 14px 12px}
  <h2 tabindex="0" data-info="Estima qué bloques todavía limpios están recibiendo presión de vecinos cargados. Combina la plaga de los vecinos, la edad del cultivo y las aplicaciones pendientes.">Riesgo de contagio hacia bloques limpios</h2>
  <div id="riesgoBox"></div>
  <div class="panel scroll" style="margin-top:12px"><table id="tRiesgo" class="mini"></table></div>
+ <h2 tabindex="0" data-info="Revisa si los polígonos cargados concuerdan entre sí. El área y la población de cada bloque se calculan del polígono, así que un contorno mal trazado arrastra esos dos números.">Revisión de la geometría cargada</h2>
+ <div id="geomBox"></div>
+ <div class="panel scroll" style="margin-top:12px"><table id="tGeom" class="mini"></table></div>
 </section>
 
 <section id="reglas" hidden>
@@ -2815,6 +2818,7 @@ function pintarGeo(){
   mapaBloques(pts, af);
  }
  try{ pintarRiesgo(); }catch(e){}
+ try{ pintarGeometria(); }catch(e){}
 
  var m=moran(pts,GEO_RADIO);
  var mb=document.getElementById('moranBox');
@@ -3144,6 +3148,7 @@ function pintarGeo(){
   mapaBloques(pts, af);
  }
  try{ pintarRiesgo(); }catch(e){}
+ try{ pintarGeometria(); }catch(e){}
 
  var m=moran(pts,GEO_RADIO);
  var mb=document.getElementById('moranBox');
@@ -4526,6 +4531,93 @@ function pintarMensajes(){
   (pocos?'<b>'+n(pocos)+'</b> bloques revisan menos de '+n(P.min)+' plantas por visita, lo que amplía demasiado el margen de error.':'')));
 
  cont.innerHTML=M.join('');
+}
+
+
+/* ========== revisión de la geometría cargada ==========
+   No corrige nada: señala qué polígonos conviene verificar antes de confiar
+   en el área y la población que se calculan a partir de ellos.
+*/
+function revisarGeometria(){
+ if(!D.polis||!Object.keys(D.polis).length) return null;
+ var lista=[];
+ D.blqs.forEach(function(b){
+  var pol=D.polis[b.blq]; if(!pol||pol.length<3) return;
+  var la0=mean(pol.map(function(q){return q.la;}));
+  var lo0=mean(pol.map(function(q){return q.lo;}));
+  var mLat=110574, mLon=111320*Math.cos(la0*Math.PI/180);
+  var sxx=0,syy=0,sxy=0, per=0, area2=0;
+  for(var i=0;i<pol.length;i++){
+   var x=(pol[i].lo-lo0)*mLon, y=(pol[i].la-la0)*mLat;
+   sxx+=x*x; syy+=y*y; sxy+=x*y;
+   var j=(i+1)%pol.length;
+   var x2=(pol[j].lo-lo0)*mLon, y2=(pol[j].la-la0)*mLat;
+   per+=Math.hypot(x2-x,y2-y);
+   area2+=x*y2-x2*y;
+  }
+  var area=Math.abs(area2)/2;
+  lista.push({b:b, la:la0, lo:lo0,
+   ang:(180/Math.PI)*0.5*Math.atan2(2*sxy,sxx-syy),
+   comp: per>0 ? 4*Math.PI*area/(per*per) : 0,
+   areaCalc: area/10000});
+ });
+ if(lista.length<4) return null;
+ var mLatG=110574, mLonG=111320*Math.cos(mean(lista.map(function(x){return x.la;}))*Math.PI/180);
+ var RADIO=120, avisos=[];
+ lista.forEach(function(x){
+  var vec=lista.filter(function(o){
+   return o!==x && Math.hypot((x.la-o.la)*mLatG,(x.lo-o.lo)*mLonG)<=RADIO; });
+  if(vec.length<3){
+   avisos.push({blq:x.b, tipo:'Aislado', det:'Solo '+n(vec.length)+' parcelas a menos de '+n(RADIO)+' m',
+    riesgo:'No hay con qué contrastar su forma. Puede ser correcto si está en un borde de la finca.'});
+   return;
+  }
+  var angs=vec.map(function(o){return ((o.ang%180)+180)%180;}).sort(function(a,b){return a-b;});
+  var med=angs[Math.floor(angs.length/2)];
+  var pr=((x.ang%180)+180)%180;
+  var dv=Math.min(Math.abs(pr-med), 180-Math.abs(pr-med));
+  if(dv>25){
+   avisos.push({blq:x.b, tipo:'Orientación distinta', det:n(dv,0)+'° respecto a sus '+n(vec.length)+' vecinos',
+    riesgo:'O el polígono quedó mal trazado, o el bloque se resembró con otra dirección de camas.'});
+  } else if(x.comp<0.12){
+   avisos.push({blq:x.b, tipo:'Forma irregular', det:'Compacidad '+n(x.comp,3),
+    riesgo:'Un contorno muy alargado o con quiebres suele indicar vértices mal digitados.'});
+  }
+ });
+ return {avisos:avisos, total:lista.length};
+}
+
+function pintarGeometria(){
+ var cont=document.getElementById('geomBox'); if(!cont) return;
+ var r=revisarGeometria();
+ if(!r){ cont.innerHTML=''; var t0=document.getElementById('tGeom'); if(t0) t0.innerHTML=''; return; }
+ var ha=r.avisos.reduce(function(s,a){ return s+(isNaN(a.blq.area)?0:a.blq.area); },0);
+ var pl=r.avisos.reduce(function(s,a){ return s+(isNaN(a.blq.poblacion)?0:a.blq.poblacion); },0);
+ cont.innerHTML= r.avisos.length
+  ? '<div class="aviso"><b>'+n(r.avisos.length)+' de '+n(r.total)+
+    ' polígonos conviene verificarlos antes de usar su área</b>'+
+    'Suman '+n(ha,1)+' hectáreas y '+n(pl)+' plantas estimadas. El área de cada bloque se calcula de su '+
+    'polígono, y de ahí sale la población: si el contorno está mal trazado, esos dos números también. '+
+    'Compárelos contra el registro propio de la finca antes de darlos por buenos.'+
+    '<br><br><span style="color:var(--ink3)">La revisión no corrige nada ni descarta bloques: solo señala '+
+    'cuáles no concuerdan con sus vecinos. Un bloque en un borde de la finca, o resembrado con otra '+
+    'dirección de camas, puede aparecer aquí siendo correcto.</span></div>'
+  : '<div class="aviso ok"><b>Los '+n(r.total)+' polígonos concuerdan entre sí</b>'+
+    'Ninguno se desvía de la orientación de sus vecinos ni tiene una forma anómala. El área y la población '+
+    'calculadas a partir de ellos son consistentes.</div>';
+ var t=document.getElementById('tGeom');
+ if(t) t.innerHTML= r.avisos.length
+  ? '<thead><tr><th>Bloque</th><th>Qué se detectó</th><th>Medida</th><th>Área declarada</th>'+
+    '<th>Plantas estimadas</th><th>Qué puede ser</th></tr></thead><tbody>'+
+    r.avisos.sort(function(a,b){ return cmpBlq(a.blq.blq,b.blq.blq); }).map(function(a){
+     return '<tr><td>'+esc(a.blq.blq)+'<div class="ci">'+esc(a.blq.lote||'—')+'</div></td>'+
+      '<td><span class="tag t1">'+esc(a.tipo)+'</span></td>'+
+      '<td>'+esc(a.det)+'</td>'+
+      '<td>'+(isNaN(a.blq.area)?'—':n(a.blq.area,2)+' ha')+'</td>'+
+      '<td>'+(isNaN(a.blq.poblacion)?'—':n(a.blq.poblacion))+'</td>'+
+      '<td style="text-align:left;color:var(--ink2)">'+esc(a.riesgo)+'</td></tr>'; }).join('')+
+    '</tbody>'
+  : '';
 }
 
 /* ========== riesgo de contagio ==========
